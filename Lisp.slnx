@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Lisp/Lisp.vcxproj" Id="54385f3c-40c5-4a02-87be-49c2a73bb1cd" />
+</Solution>
