@@ -30,6 +30,9 @@
     <ClCompile Include="map.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="env.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="base_types.h">
@@ -45,6 +48,9 @@
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
     <ClInclude Include="map.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="env.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
   </ItemGroup>

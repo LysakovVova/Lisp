@@ -34,6 +34,7 @@ void read_symbol(char* line, int* idx, char** ans) {
 		line[*idx] != ' ' &&
 		line[*idx] != '\t' &&
 		line[*idx] != '\n' &&
+		line[*idx] != '\'' &&
 		line[*idx] != '(' &&
 		line[*idx] != ')') {
 		if (n + 1 >= cup) {
@@ -80,6 +81,10 @@ void reader(Line_token* vec, char* line) {
 			vec->a[vec->n].type = RPAREN;
 			idx_line++;
 		}
+		else if (cur == '\'') {
+			vec->a[vec->n].type = QUOTE;
+			idx_line++;
+		}
 		else if (
 			(cur >= '0' && cur <= '9') ||
 			(cur == '+' && next_simbol >= '0' && next_simbol <= '9') ||
@@ -118,6 +123,9 @@ void print_token(Line_token* vec) {
 			break;
 		case NUMBER:
 			printf("NUM = %lld", vec->a[i].number);
+			break;
+		case QUOTE:
+			printf("'");
 			break;
 		case SYMBOL:
 			printf("SYMB = %s", vec->a[i].text);

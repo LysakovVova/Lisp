@@ -1,4 +1,5 @@
 #include "map.h"
+#include "expr.h"
 
 static pair_hash MOD = { 1000000007LL, 1000000009LL };
 static pair_hash BASE = { 31, 53 };
@@ -76,7 +77,7 @@ static int cmp_key(long long hash, const char* key, node* n) {
 	return strcmp(key, n->key_string);
 }
 
-static node* create_node(const char* key, long long value) {
+static node* create_node(const char* key, Value* value) {
 	node* n = (node*)malloc(sizeof(node));
 	n->prio = random_int(0, 1000000000);
 	n->key = hash_string(key);
@@ -94,6 +95,7 @@ static node* ins(node* root, node* x) {
 
 	int cmp = cmp_key(x->key, x->key_string, root);
 	if (cmp == 0) {
+		free_value(root->value);
 		root->value = x->value;
 		free(x->key_string);
 		free(x);
@@ -115,7 +117,7 @@ static node* ins(node* root, node* x) {
 	return root;
 }
 
-void insert(bst* v, const char* key, long long value) {
+void insert(bst* v, const char* key, Value* value) {
 	node* n = create_node(key, value);
 	v->head = ins(v->head, n);
 }
@@ -130,7 +132,7 @@ static node* find_node(node* root, long long hash, const char* key) {
 	return NULL;
 }
 
-bool get(bst* v, const char* key, long long* out_value) {
+bool get(bst* v, const char* key, Value** out_value) {
 	long long h = hash_string(key);
 	node* n = find_node(v->head, h, key);
 	if (!n) return false;
@@ -172,6 +174,7 @@ static node* er(node* root, long long h, const char* key) {
 	node* l = root->left;
 	node* r = root->right;
 	free(root->key_string);
+	free_value(root->value);
 	free(root);
 	return merge(l, r);
 }
@@ -183,7 +186,9 @@ void erase(bst* v, const char* key) {
 static void print_b(node* root) {
 	if (!root) return;
 	print_b(root->left);
-	printf("%s : %lld\n", root->key_string, root->value);
+	printf("%s : ", root->key_string);
+	print_value(root->value);
+	printf("\n");
 	print_b(root->right);
 }
 
@@ -197,6 +202,7 @@ static void free_nodes(node* root) {
 	free_nodes(root->left);
 	free_nodes(root->right);
 	free(root->key_string);
+	free_value(root->value);
 	free(root);
 }
 

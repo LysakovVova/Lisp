@@ -6,6 +6,7 @@
 typedef enum {
     LPAREN,
     RPAREN,
+    QUOTE,
     NUMBER,
     SYMBOL,
     END
@@ -26,21 +27,33 @@ typedef struct {
 typedef enum {
 	VAL_NUMBER,
 	VAL_SYMBOL,
-	VAL_LIST
+	VAL_LIST,
+	VAL_BOLIAN,
+	VAL_LAMBDA
 } ValueType;
 
 typedef struct Value Value;
+
+typedef struct Env Env;
 
 struct Value {
 	ValueType type;
 	union {
 		long long number;
+		bool bolian;
 		char* symbol;
 		struct {
 			Value** items;
 			int count;
 			int cap;
+			bool dotted;
+			Value* tail;
 		} list;
+		struct {
+			Value* params;
+			Value* body;
+			Env* closure;
+		} lambda;
 	};
 };
 
@@ -60,16 +73,16 @@ typedef struct node {
 	long long key;
 	int prio;
 	char* key_string;
-	long long value;
-}node;
+	Value* value;
+} node;
 
 typedef struct bst {
 	node* head;
-}bst;
+} bst;
 
-typedef struct Env {
+struct Env {
 	struct Env* parent;
 	bst variables;
-} Env;
+};
 
 #endif

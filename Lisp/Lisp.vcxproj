@@ -128,6 +128,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="env.c" />
     <ClCompile Include="eval.c" />
     <ClCompile Include="lexer.c" />
     <ClCompile Include="expr.c" />
@@ -136,6 +137,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="base_types.h" />
+    <ClInclude Include="env.h" />
     <ClInclude Include="eval.h" />
     <ClInclude Include="lexer.h" />
     <ClInclude Include="expr.h" />
