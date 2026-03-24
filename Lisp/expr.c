@@ -1,15 +1,28 @@
 #include "expr.h"
 
+static char* my_strdup(const char* s);
+
 Value* make_number(long long x) {
 	Value* v = (Value*)malloc(sizeof(Value));
 	v->type = VAL_NUMBER;
 	v->number = x;
 	return v;
 }
+Value* make_string(const char* s) {
+	Value* v = (Value*)malloc(sizeof(Value));
+	v->type = VAL_STRING;
+	v->string = my_strdup(s);
+	return v;
+}
 Value* make_bolian(bool b) {
 	Value* v = (Value*)malloc(sizeof(Value));
 	v->type = VAL_BOLIAN;
 	v->bolian = b;
+	return v;
+}
+Value* make_void(void) {
+	Value* v = (Value*)malloc(sizeof(Value));
+	v->type = VAL_VOID;
 	return v;
 }
 Value* make_lambda(Value* params, Value* body, Env* closure) {
@@ -69,6 +82,7 @@ void list_push(Value* list, Value* item) {
 Value* copy_value(Value* v) {
 	if (v == NULL) return NULL;
 	if (v->type == VAL_NUMBER) return make_number(v->number);
+	if (v->type == VAL_STRING) return make_string(v->string);
 	if (v->type == VAL_BOLIAN) return make_bolian(v->bolian);
 	if (v->type == VAL_SYMBOL) return make_symbol(v->symbol);
 
@@ -115,6 +129,11 @@ Value* read_expr(Line_token* tokens, int* pos) {
 	if (cur.type == NUMBER) {
 		(*pos)++;
 		return make_number(cur.number);
+	}
+
+	if (cur.type == STRING) {
+		(*pos)++;
+		return make_string(cur.text);
 	}
 
 	if (cur.type == SYMBOL) {
@@ -197,6 +216,18 @@ void print_value(Value* v) {
 	if (v->type == VAL_NUMBER) {
 		printf("%lld", v->number);
 	}
+	else if (v->type == VAL_STRING) {
+		printf("\"");
+		for (int i = 0; v->string[i] != '\0'; ++i) {
+			char c = v->string[i];
+			if (c == '"') printf("\\\"");
+			else if (c == '\\') printf("\\\\");
+			else if (c == '\n') printf("\\n");
+			else if (c == '\t') printf("\\t");
+			else printf("%c", c);
+		}
+		printf("\"");
+	}
 	else if (v->type == VAL_SYMBOL) {
 		printf("%s", v->symbol);
 	}
@@ -226,6 +257,9 @@ void free_value(Value* v) {
 
 	if (v->type == VAL_SYMBOL) {
 		free(v->symbol);
+	}
+	else if (v->type == VAL_STRING) {
+		free(v->string);
 	}
 	else if (v->type == VAL_LIST) {
 		for (int i = 0; i < v->list.count; i++) {

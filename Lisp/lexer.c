@@ -34,6 +34,7 @@ void read_symbol(char* line, int* idx, char** ans) {
 		line[*idx] != ' ' &&
 		line[*idx] != '\t' &&
 		line[*idx] != '\n' &&
+		line[*idx] != '"' &&
 		line[*idx] != '\'' &&
 		line[*idx] != '(' &&
 		line[*idx] != ')') {
@@ -49,6 +50,68 @@ void read_symbol(char* line, int* idx, char** ans) {
 	*ans = s;
 }
 
+void read_string(char* line, int* idx, char** ans, bool* ok) {
+	*ok = true;
+	(*idx)++;
+
+	int cup = 16;
+	char* s = (char*)malloc(cup * sizeof(char));
+	if (s == NULL) {
+		*ok = false;
+		*ans = NULL;
+		return;
+	}
+
+	int n = 0;
+	while (line[*idx] && line[*idx] != '"') {
+		char ch = line[*idx];
+
+		if (ch == '\\') {
+			(*idx)++;
+			if (!line[*idx]) {
+				free(s);
+				*ok = false;
+				*ans = NULL;
+				return;
+			}
+
+			switch (line[*idx]) {
+			case 'n': ch = '\n'; break;
+			case 't': ch = '\t'; break;
+			case '"': ch = '"'; break;
+			case '\\': ch = '\\'; break;
+			default: ch = line[*idx]; break;
+			}
+		}
+
+		if (n + 1 >= cup) {
+			cup *= 2;
+			char* new_s = (char*)realloc(s, cup * sizeof(char));
+			if (new_s == NULL) {
+				free(s);
+				*ok = false;
+				*ans = NULL;
+				return;
+			}
+			s = new_s;
+		}
+
+		s[n++] = ch;
+		(*idx)++;
+	}
+
+	if (line[*idx] != '"') {
+		free(s);
+		*ok = false;
+		*ans = NULL;
+		return;
+	}
+
+	(*idx)++;
+	s[n] = '\0';
+	*ans = s;
+}
+
 void reader(Line_token* vec, char* line) {
 	vec->n = 0;
 	vec->cup = 2;
@@ -58,6 +121,7 @@ void reader(Line_token* vec, char* line) {
 	int idx_line = 0;
 	char cur;
 	char next_simbol;
+	bool lex_error = false;
 	while (line[idx_line]) {
 		if (line[idx_line] == ' ' || line[idx_line] == '\t' || line[idx_line] == '\n') {
 			idx_line++;
@@ -93,6 +157,16 @@ void reader(Line_token* vec, char* line) {
 			vec->a[vec->n].type = NUMBER;
 			read_number(line, &idx_line, &vec->a[vec->n].number);
 		}
+		else if (cur == '"') {
+			bool ok = false;
+			vec->a[vec->n].type = STRING;
+			read_string(line, &idx_line, &vec->a[vec->n].text, &ok);
+			if (!ok) {
+				printf("Syntax error: invalid or unterminated string literal\n");
+				lex_error = true;
+				break;
+			}
+		}
 		else {
 			vec->a[vec->n].type = SYMBOL;
 			read_symbol(line, &idx_line, &vec->a[vec->n].text);
@@ -105,7 +179,15 @@ void reader(Line_token* vec, char* line) {
 		vec->cup *= 2;
 		vec->a = (Token*)realloc(vec->a, vec->cup * sizeof(Token));
 	}
-	if (line[idx_line] == '\0') {
+	if (!lex_error && line[idx_line] == '\0') {
+		vec->a[vec->n].type = END;
+		vec->n++;
+	}
+	else if (lex_error) {
+		if (vec->cup == vec->n) {
+			vec->cup *= 2;
+			vec->a = (Token*)realloc(vec->a, vec->cup * sizeof(Token));
+		}
 		vec->a[vec->n].type = END;
 		vec->n++;
 	}
@@ -124,6 +206,9 @@ void print_token(Line_token* vec) {
 		case NUMBER:
 			printf("NUM = %lld", vec->a[i].number);
 			break;
+		case STRING:
+			printf("STR = \"%s\"", vec->a[i].text);
+			break;
 		case QUOTE:
 			printf("'");
 			break;
@@ -140,7 +225,7 @@ void print_token(Line_token* vec) {
 
 void free_tokens(Line_token* vec) {
 	for (int i = 0; i < vec->n; i++) {
-		if (vec->a[i].type == SYMBOL) {
+		if (vec->a[i].type == SYMBOL || vec->a[i].type == STRING) {
 			free(vec->a[i].text);
 			vec->a[i].text = NULL;
 		}

@@ -8,6 +8,7 @@ typedef enum {
     RPAREN,
     QUOTE,
     NUMBER,
+    STRING,
     SYMBOL,
     END
 } TokenType;
@@ -26,10 +27,12 @@ typedef struct {
 
 typedef enum {
 	VAL_NUMBER,
+	VAL_STRING,
 	VAL_SYMBOL,
 	VAL_LIST,
 	VAL_BOLIAN,
-	VAL_LAMBDA
+	VAL_LAMBDA,
+	VAL_VOID,
 } ValueType;
 
 typedef struct Value Value;
@@ -41,6 +44,7 @@ struct Value {
 	union {
 		long long number;
 		bool bolian;
+		char* string;
 		char* symbol;
 		struct {
 			Value** items;

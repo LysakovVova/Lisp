@@ -11,11 +11,12 @@
 
 void free_value(Value* v);
 Value* make_number(long long x);
+Value* make_string(const char* s);
 Value* make_bolian(bool b);
 Value* make_lambda(Value* params, Value* body, Env* closure);
-char* my_strdup(const char* s);
 Value* make_symbol(const char* s);
 Value* make_list(void);
+Value* make_void(void);
 void list_push(Value* list, Value* item);
 Value* copy_value(Value* v);
 

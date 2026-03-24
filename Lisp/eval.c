@@ -323,7 +323,7 @@ static Value* apply_if(Value* expr, Env* env) {
 		return eval(expr->list.items[2], env);
 	}
 	if (expr->list.count != 4) {
-		return make_bolian(false);
+		return make_void();
 	}
 	return eval(expr->list.items[3], env);
 }
@@ -763,6 +763,9 @@ static bool value_equal(const Value* a, const Value* b) {
 	case VAL_NUMBER:
 		return a->number == b->number;
 
+	case VAL_STRING:
+		return strcmp(a->string, b->string) == 0;
+
 	case VAL_BOLIAN:
 		return a->bolian == b->bolian;
 
@@ -797,6 +800,9 @@ static bool value_eq(const Value* a, const Value* b) {
 	if (a->type != b->type) return false;
 
 	switch (a->type) {
+	case VAL_STRING:
+		return strcmp(a->string, b->string) == 0;
+
 	case VAL_BOLIAN:
 		return a->bolian == b->bolian;
 
@@ -816,6 +822,9 @@ static bool value_eqv(const Value* a, const Value* b) {
 	switch (a->type) {
 	case VAL_NUMBER:
 		return a->number == b->number;
+
+	case VAL_STRING:
+		return strcmp(a->string, b->string) == 0;
 
 	case VAL_BOLIAN:
 		return a->bolian == b->bolian;
@@ -1116,6 +1125,96 @@ static Value* apply_map(Value* expr, Env* env) {
 	return res;
 }
 
+static Value* apply_for_each(Value* expr, Env* env) {
+	if (expr->list.count < 3) {
+		printf("Error: for-each expects a function and at least 1 list\n");
+		return NULL;
+	}
+
+	Value* fun = eval(expr->list.items[1], env);
+	if (fun == NULL) {
+		printf("Error: failed to evaluate function argument of for-each\n");
+		return NULL;
+	}
+	if (fun->type != VAL_LAMBDA) {
+		printf("Error: first argument of for-each must be a function\n");
+		free_value(fun);
+		return NULL;
+	}
+
+	int list_count = expr->list.count - 2;
+	Value** lists = (Value**)malloc(sizeof(Value*) * list_count);
+	if (lists == NULL) {
+		printf("Error: out of memory\n");
+		free_value(fun);
+		return NULL;
+	}
+
+	int min_len = -1;
+	for (int i = 0; i < list_count; ++i) {
+		lists[i] = eval(expr->list.items[i + 2], env);
+		if (lists[i] == NULL) {
+			printf("Error: failed to evaluate list argument of for-each\n");
+			for (int k = 0; k < i; ++k) free_value(lists[k]);
+			free(lists);
+			free_value(fun);
+			return NULL;
+		}
+
+		if (lists[i]->type != VAL_LIST) {
+			printf("Error: all arguments after the first in for-each must be lists\n");
+			for (int k = 0; k <= i; ++k) free_value(lists[k]);
+			free(lists);
+			free_value(fun);
+			return NULL;
+		}
+		if (lists[i]->list.dotted) {
+			printf("Error: for-each expects proper lists, dotted pair given\n");
+			for (int k = 0; k <= i; ++k) free_value(lists[k]);
+			free(lists);
+			free_value(fun);
+			return NULL;
+		}
+
+		if (min_len == -1 || lists[i]->list.count < min_len) {
+			min_len = lists[i]->list.count;
+		}
+	}
+
+	for (int idx = 0; idx < min_len; ++idx) {
+		Value* call_expr = make_list();
+		list_push(call_expr, copy_value(fun));
+
+		for (int li = 0; li < list_count; ++li) {
+			Value* arg_copy = copy_value(lists[li]->list.items[idx]);
+			if (arg_copy == NULL) {
+				free_value(call_expr);
+				for (int k = 0; k < list_count; ++k) free_value(lists[k]);
+				free(lists);
+				free_value(fun);
+				return NULL;
+			}
+			list_push(call_expr, arg_copy);
+		}
+
+		Value* applied = eval(call_expr, env);
+		free_value(call_expr);
+		if (applied == NULL) {
+			printf("Error: failed to evaluate function application in for-each\n");
+			for (int k = 0; k < list_count; ++k) free_value(lists[k]);
+			free(lists);
+			free_value(fun);
+			return NULL;
+		}
+		free_value(applied);
+	}
+
+	for (int k = 0; k < list_count; ++k) free_value(lists[k]);
+	free(lists);
+	free_value(fun);
+	return make_void();
+}
+
 static Value* make_quoted_expr(Value* value) {
 	Value* quoted = make_list();
 	if (quoted == NULL) return NULL;
@@ -1204,6 +1303,29 @@ static Value* apply_apply(Value* expr, Env* env) {
 	return result;
 }
 
+static Value* appluy_displey(Value* expr, Env* env) {
+	if (expr->list.count != 2) {
+		printf("Error: display expects exactly 1 argument\n");
+		return NULL;
+	}
+	Value* v = eval(expr->list.items[1], env);
+	if (v == NULL) {
+		printf("Error: failed to evaluate argument of display\n");
+		return NULL;
+	}
+	print_value(v);
+	free(v);
+	return make_void();
+}
+
+static Value* apply_newline(Value* expr, Value* env) {
+	if (expr->list.count != 1) {
+		printf("Error: newline expects no arguments\n");
+		return NULL;
+	}
+	printf("\n");
+	return make_void();
+}
 
 static Value* apply_cond(Value* expr, Env* env) {
 	if (expr->list.count < 2) {
@@ -1268,6 +1390,80 @@ static Value* apply_cond(Value* expr, Env* env) {
 	return make_bolian(false);
 }
 
+static Value* apply_case(Value* expr, Env* env) {
+	if (expr->list.count < 3) {
+		printf("Error: case expects key and at least 1 clause\n");
+		return NULL;
+	}
+
+	Value* key = eval(expr->list.items[1], env);
+	if (key == NULL) {
+		printf("Error: failed to evaluate case key\n");
+		return NULL;
+	}
+
+	for (int i = 2; i < expr->list.count; ++i) {
+		Value* clause = expr->list.items[i];
+		if (clause->type != VAL_LIST || clause->list.count < 1) {
+			printf("Error: each case clause must be a non-empty list\n");
+			free_value(key);
+			return NULL;
+		}
+
+		Value* head = clause->list.items[0];
+		bool is_else = (head->type == VAL_SYMBOL && strcmp(head->symbol, "else") == 0);
+		if (is_else && i != expr->list.count - 1) {
+			printf("Error: else clause in case must be the last clause\n");
+			free_value(key);
+			return NULL;
+		}
+
+		bool matched = false;
+		if (is_else) {
+			matched = true;
+		}
+		else {
+			if (head->type != VAL_LIST) {
+				printf("Error: case datum list must be a list\n");
+				free_value(key);
+				return NULL;
+			}
+
+			for (int j = 0; j < head->list.count; ++j) {
+				if (value_eqv(key, head->list.items[j])) {
+					matched = true;
+					break;
+				}
+			}
+		}
+
+		if (!matched) continue;
+
+		if (clause->list.count == 1) {
+			free_value(key);
+			if (is_else) return make_bolian(true);
+			return make_bolian(false);
+		}
+
+		Value* res = NULL;
+		for (int j = 1; j < clause->list.count; ++j) {
+			if (res != NULL) free_value(res);
+			res = eval(clause->list.items[j], env);
+			if (res == NULL) {
+				printf("Error: failed to evaluate expression in case clause\n");
+				free_value(key);
+				return NULL;
+			}
+		}
+
+		free_value(key);
+		return res;
+	}
+
+	free_value(key);
+	return make_bolian(false);
+}
+
 
 static BuiltinEntry g_builtins[] = {
 	{ "+", apply_plus },
@@ -1283,6 +1479,7 @@ static BuiltinEntry g_builtins[] = {
 	{ "<=", apply_compare },
 	{ "if", apply_if },
 	{ "cond", apply_cond },
+	{ "case", apply_case },
 	{ "not", apply_not },
 	{ "and", apply_and },
 	{ "or", apply_or },
@@ -1308,7 +1505,10 @@ static BuiltinEntry g_builtins[] = {
 	{ "append", apply_append },
 	{ "length", apply_length },
 	{ "map", apply_map },
+	{ "for-each", apply_for_each },
 	{ "apply", apply_apply },
+	{ "display", appluy_displey },
+	{ "newline", apply_newline },
 };
 
 static BuiltinFn find_builtin(const char* op) {
@@ -1382,6 +1582,10 @@ static Value* apply_lambda_call(Value* fn, Value* call_expr, Env* env) {
 static Value* eval_impl(Value* expr, Env* env) {
 	if (expr->type == VAL_NUMBER) {
 		return make_number(expr->number);
+	}
+
+	if (expr->type == VAL_STRING) {
+		return make_string(expr->string);
 	}
 
 	if (expr->type == VAL_SYMBOL) {
