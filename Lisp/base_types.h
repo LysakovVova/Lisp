@@ -89,4 +89,21 @@ struct Env {
 	bst variables;
 };
 
+typedef Value* (*BuiltinFn)(Value* expr, Env* env);
+
+typedef void (*BuiltinHelpFn)(void);
+
+typedef struct {
+	const char* name;
+	BuiltinFn fn;
+	BuiltinHelpFn help_fn;
+} BuiltinEntry;
+
+typedef void (*ReplFn)(const char* s, Env* env);
+
+typedef struct {
+	const char* name;
+	ReplFn fn;
+} ReplEntry;
+
 #endif

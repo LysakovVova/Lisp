@@ -33,6 +33,12 @@
     <ClCompile Include="env.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="repl.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
+    <ClCompile Include="helper.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="base_types.h">
@@ -53,5 +59,16 @@
     <ClInclude Include="env.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
+    <ClInclude Include="repl.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="helper.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="test.lisp">
+      <Filter>Исходные файлы</Filter>
+    </None>
   </ItemGroup>
 </Project>

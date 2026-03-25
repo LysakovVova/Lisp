@@ -1,14 +1,8 @@
 #include "eval.h"
 
-typedef Value* (*BuiltinFn)(Value* expr, Env* env);
-
-typedef struct {
-	const char* name;
-	BuiltinFn fn;
-} BuiltinEntry;
-
 static Value* apply_begin(Value* expr, Env* env);
 static Value* eval_impl(Value* expr, Env* env);
+static BuiltinFn find_builtin(const char* op);
 
 static int g_eval_depth = 0;
 static const int MAX_EVAL_DEPTH = 700;
@@ -38,10 +32,273 @@ static bool eval_truthy(Value* expr, Env* env, bool* out) {
 	return true;
 }
 
-static Value* apply_plus(Value* expr, Env* env) {
-	if (expr->list.count < 3) {
-		printf("Error: + expects at least 2 arguments\n");
+static bst g_memo_cache;
+static bool g_memo_inited = false;
+static int g_memo_cache_size = 0;
+static int g_memo_cache_limit = 256;
+
+static void memo_init(void) {
+	if (g_memo_inited) return;
+	init_bst(&g_memo_cache);
+	g_memo_inited = true;
+}
+
+static void memo_clear_all(void) {
+	if (!g_memo_inited) return;
+	free_bst(&g_memo_cache);
+	init_bst(&g_memo_cache);
+	g_memo_cache_size = 0;
+}
+
+static bool key_append_char(char** buf, int* len, int* cap, char c) {
+	if (*len + 2 >= *cap) {
+		int new_cap = (*cap == 0 ? 64 : (*cap * 2));
+		char* tmp = (char*)realloc(*buf, new_cap);
+		if (tmp == NULL) return false;
+		*buf = tmp;
+		*cap = new_cap;
+	}
+	(*buf)[(*len)++] = c;
+	(*buf)[*len] = '\0';
+	return true;
+}
+
+static bool key_append_cstr(char** buf, int* len, int* cap, const char* s) {
+	for (int i = 0; s[i] != '\0'; ++i) {
+		if (!key_append_char(buf, len, cap, s[i])) return false;
+	}
+	return true;
+}
+
+static bool key_append_ll(char** buf, int* len, int* cap, long long x) {
+	char tmp[64];
+	snprintf(tmp, sizeof(tmp), "%lld", x);
+	return key_append_cstr(buf, len, cap, tmp);
+}
+
+static bool key_append_escaped(char** buf, int* len, int* cap, const char* s) {
+	for (int i = 0; s[i] != '\0'; ++i) {
+		char c = s[i];
+		if (c == '\\' || c == '|' || c == ',' || c == '[' || c == ']') {
+			if (!key_append_char(buf, len, cap, '\\')) return false;
+		}
+		if (!key_append_char(buf, len, cap, c)) return false;
+	}
+	return true;
+}
+
+static bool serialize_value_for_key(const Value* v, char** buf, int* len, int* cap) {
+	if (v == NULL) return false;
+
+	switch (v->type) {
+	case VAL_NUMBER:
+		return key_append_char(buf, len, cap, 'N') && key_append_ll(buf, len, cap, v->number);
+
+	case VAL_STRING:
+		return key_append_char(buf, len, cap, 'T') && key_append_escaped(buf, len, cap, v->string);
+
+	case VAL_BOLIAN:
+		return key_append_char(buf, len, cap, 'B') && key_append_char(buf, len, cap, v->bolian ? '1' : '0');
+
+	case VAL_SYMBOL:
+		return key_append_char(buf, len, cap, 'S') && key_append_escaped(buf, len, cap, v->symbol);
+
+	case VAL_LIST:
+		if (!key_append_char(buf, len, cap, '[')) return false;
+		for (int i = 0; i < v->list.count; ++i) {
+			if (i > 0 && !key_append_char(buf, len, cap, ',')) return false;
+			if (!serialize_value_for_key(v->list.items[i], buf, len, cap)) return false;
+		}
+		if (v->list.dotted) {
+			if (!key_append_cstr(buf, len, cap, "|.")) return false;
+			if (!serialize_value_for_key(v->list.tail, buf, len, cap)) return false;
+		}
+		return key_append_char(buf, len, cap, ']');
+
+	default:
+		return false;
+	}
+}
+
+static bool is_impure_op(const char* s) {
+	return strcmp(s, "set!") == 0 ||
+		strcmp(s, "define") == 0 ||
+		strcmp(s, "display") == 0 ||
+		strcmp(s, "newline") == 0 ||
+		strcmp(s, "for-each") == 0;
+}
+
+static bool has_impure_effects(Value* expr) {
+	if (expr == NULL) return false;
+	if (expr->type != VAL_LIST) return false;
+
+	if (expr->list.count > 0 && expr->list.items[0]->type == VAL_SYMBOL) {
+		const char* op = expr->list.items[0]->symbol;
+		if (is_impure_op(op)) return true;
+		if (strcmp(op, "quote") == 0) return false;
+	}
+
+	for (int i = 0; i < expr->list.count; ++i) {
+		if (has_impure_effects(expr->list.items[i])) return true;
+	}
+	if (expr->list.dotted && has_impure_effects(expr->list.tail)) return true;
+	return false;
+}
+
+static bool symbol_in_params(Value* params, const char* name) {
+	if (params == NULL || params->type != VAL_LIST) return false;
+	for (int i = 0; i < params->list.count; ++i) {
+		Value* p = params->list.items[i];
+		if (p->type == VAL_SYMBOL && strcmp(p->symbol, name) == 0) return true;
+	}
+	return false;
+}
+
+typedef struct LocalScope {
+	Value* bindings;
+	struct LocalScope* parent;
+} LocalScope;
+
+static bool symbol_in_bindings(Value* bindings, const char* name) {
+	if (bindings == NULL || bindings->type != VAL_LIST) return false;
+	for (int i = 0; i < bindings->list.count; ++i) {
+		Value* b = bindings->list.items[i];
+		if (b->type != VAL_LIST || b->list.count < 1) continue;
+		Value* n = b->list.items[0];
+		if (n->type == VAL_SYMBOL && strcmp(n->symbol, name) == 0) return true;
+	}
+	return false;
+}
+
+static bool symbol_in_local_scope(LocalScope* scope, const char* name) {
+	for (LocalScope* cur = scope; cur != NULL; cur = cur->parent) {
+		if (symbol_in_bindings(cur->bindings, name)) return true;
+	}
+	return false;
+}
+
+static bool has_external_symbols_impl(Value* expr, Value* params, const char* self_name, LocalScope* scope) {
+	if (expr == NULL) return false;
+
+	if (expr->type == VAL_SYMBOL) {
+		if (strcmp(expr->symbol, "else") == 0) return false;
+		if (symbol_in_params(params, expr->symbol)) return false;
+		if (symbol_in_local_scope(scope, expr->symbol)) return false;
+		if (self_name != NULL && strcmp(expr->symbol, self_name) == 0) return false;
+		if (find_builtin(expr->symbol) != NULL) return false;
+		return true;
+	}
+
+	if (expr->type != VAL_LIST) return false;
+
+	if (expr->list.count > 0 && expr->list.items[0]->type == VAL_SYMBOL &&
+		strcmp(expr->list.items[0]->symbol, "quote") == 0) {
+		return false;
+	}
+
+	if (expr->list.count > 0 && expr->list.items[0]->type == VAL_SYMBOL) {
+		const char* op = expr->list.items[0]->symbol;
+
+		if (strcmp(op, "cond") == 0) {
+			for (int i = 1; i < expr->list.count; ++i) {
+				Value* clause = expr->list.items[i];
+				if (clause->type != VAL_LIST || clause->list.count < 1) continue;
+
+				int start = 0;
+				if (clause->list.items[0]->type == VAL_SYMBOL && strcmp(clause->list.items[0]->symbol, "else") == 0) {
+					start = 1;
+				}
+
+				for (int j = start; j < clause->list.count; ++j) {
+					if (has_external_symbols_impl(clause->list.items[j], params, self_name, scope)) return true;
+				}
+			}
+			return false;
+		}
+
+		if (strcmp(op, "case") == 0) {
+			if (expr->list.count > 1 && has_external_symbols_impl(expr->list.items[1], params, self_name, scope)) return true;
+			for (int i = 2; i < expr->list.count; ++i) {
+				Value* clause = expr->list.items[i];
+				if (clause->type != VAL_LIST || clause->list.count < 1) continue;
+				for (int j = 1; j < clause->list.count; ++j) {
+					if (has_external_symbols_impl(clause->list.items[j], params, self_name, scope)) return true;
+				}
+			}
+			return false;
+		}
+
+		if ((strcmp(op, "let") == 0 || strcmp(op, "let*") == 0 || strcmp(op, "letrec") == 0) && expr->list.count >= 3) {
+			Value* bindings = expr->list.items[1];
+			if (bindings->type == VAL_LIST) {
+				for (int i = 0; i < bindings->list.count; ++i) {
+					Value* b = bindings->list.items[i];
+					if (b->type == VAL_LIST && b->list.count == 2) {
+						if (has_external_symbols_impl(b->list.items[1], params, self_name, scope)) return true;
+					}
+				}
+			}
+
+			LocalScope inner;
+			inner.bindings = (bindings->type == VAL_LIST ? bindings : NULL);
+			inner.parent = scope;
+			for (int i = 2; i < expr->list.count; ++i) {
+				if (has_external_symbols_impl(expr->list.items[i], params, self_name, &inner)) return true;
+			}
+			return false;
+		}
+	}
+
+	for (int i = 0; i < expr->list.count; ++i) {
+		if (has_external_symbols_impl(expr->list.items[i], params, self_name, scope)) return true;
+	}
+	if (expr->list.dotted && has_external_symbols_impl(expr->list.tail, params, self_name, scope)) return true;
+	return false;
+}
+
+static bool has_external_symbols(Value* expr, Value* params, const char* self_name) {
+	return has_external_symbols_impl(expr, params, self_name, NULL);
+}
+
+static bool can_memoize_lambda_call(Value* fn, Value* call_expr) {
+	if (fn == NULL || fn->type != VAL_LAMBDA) return false;
+	if (call_expr->list.items[0]->type != VAL_SYMBOL) return false;
+	const char* self_name = call_expr->list.items[0]->symbol;
+	if (has_impure_effects(fn->lambda.body)) return false;
+	if (has_external_symbols(fn->lambda.body, fn->lambda.params, self_name)) return false;
+	return true;
+}
+
+static char* make_memo_key(const char* fn_name, Value** args, int arg_count) {
+	char* key = NULL;
+	int len = 0, cap = 0;
+
+	if (!key_append_cstr(&key, &len, &cap, fn_name)) {
+		free(key);
 		return NULL;
+	}
+	if (!key_append_char(&key, &len, &cap, '|')) {
+		free(key);
+		return NULL;
+	}
+
+	for (int i = 0; i < arg_count; ++i) {
+		if (i > 0 && !key_append_char(&key, &len, &cap, ';')) {
+			free(key);
+			return NULL;
+		}
+		if (!serialize_value_for_key(args[i], &key, &len, &cap)) {
+			free(key);
+			return NULL;
+		}
+	}
+
+	return key;
+}
+
+static Value* apply_plus(Value* expr, Env* env) {
+	if (expr->list.count == 1) {
+		return make_number(0);
 	}
 	long long ans = 0;
 	for (int i = 1; i < expr->list.count; i++) {
@@ -54,9 +311,8 @@ static Value* apply_plus(Value* expr, Env* env) {
 }
 
 static Value* apply_mul(Value* expr, Env* env) {
-	if (expr->list.count < 3) {
-		printf("Error: * expects at least 2 arguments\n");
-		return NULL;
+	if (expr->list.count == 1) {
+		return make_number(1);
 	}
 	long long ans = 1;
 	for (int i = 1; i < expr->list.count; i++) {
@@ -134,6 +390,7 @@ static Value* apply_define(Value* expr, Env* env) {
 		}
 
 		env_set(env, target->symbol, stored);
+		memo_clear_all();
 		return value;
 	}
 
@@ -181,6 +438,7 @@ static Value* apply_define(Value* expr, Env* env) {
 		}
 
 		env_set(env, fname->symbol, stored);
+		memo_clear_all();
 		return lambda_value;
 	}
 
@@ -189,8 +447,8 @@ static Value* apply_define(Value* expr, Env* env) {
 }
 
 static Value* apply_lambda(Value* expr, Env* env) {
-	if (expr->list.count != 3) {
-		printf("Error: lambda expects exactly 2 arguments: params and body\n");
+	if (expr->list.count < 3) {
+		printf("Error: lambda expects parameters and at least 1 body expression\n");
 		return NULL;
 	}
 
@@ -208,7 +466,27 @@ static Value* apply_lambda(Value* expr, Env* env) {
 	}
 
 	Value* params_copy = copy_value(params);
-	Value* body_copy = copy_value(expr->list.items[2]);
+	Value* body_copy = NULL;
+
+	if (expr->list.count == 3) {
+		body_copy = copy_value(expr->list.items[2]);
+	}
+	else {
+		body_copy = make_list();
+		if (body_copy != NULL) {
+			list_push(body_copy, make_symbol("begin"));
+			for (int i = 2; i < expr->list.count; ++i) {
+				Value* part = copy_value(expr->list.items[i]);
+				if (part == NULL) {
+					free_value(body_copy);
+					body_copy = NULL;
+					break;
+				}
+				list_push(body_copy, part);
+			}
+		}
+	}
+
 	if (params_copy == NULL || body_copy == NULL) {
 		free_value(params_copy);
 		free_value(body_copy);
@@ -577,13 +855,96 @@ static Value* apply_let(Value* expr, Env* env) {
 		return NULL;
 	}
 
+	int body_start = 2;
+	Value* name_sym = NULL;
 	Value* bindings = expr->list.items[1];
+
+	if (bindings->type == VAL_SYMBOL) {
+		if (expr->list.count < 4) {
+			printf("Error: named let expects name, bindings and at least 1 body expression\n");
+			return NULL;
+		}
+		name_sym = bindings;
+		bindings = expr->list.items[2];
+		body_start = 3;
+	}
+
 	if (bindings->type != VAL_LIST) {
 		printf("Error: let bindings must be a list\n");
 		return NULL;
 	}
 
 	Env* let_env = create_env(env);
+
+	if (name_sym != NULL) {
+		Value* params = make_list();
+		if (params == NULL) {
+			free_env(let_env);
+			return NULL;
+		}
+
+		for (int i = 0; i < bindings->list.count; ++i) {
+			Value* binding = bindings->list.items[i];
+			if (binding->type != VAL_LIST || binding->list.count != 2) {
+				printf("Error: each let binding must be a list: (name value)\n");
+				free_value(params);
+				free_env(let_env);
+				return NULL;
+			}
+
+			Value* pname = binding->list.items[0];
+			if (pname->type != VAL_SYMBOL) {
+				printf("Error: let binding name must be a symbol\n");
+				free_value(params);
+				free_env(let_env);
+				return NULL;
+			}
+
+			Value* pname_copy = copy_value(pname);
+			if (pname_copy == NULL) {
+				free_value(params);
+				free_env(let_env);
+				return NULL;
+			}
+			list_push(params, pname_copy);
+		}
+
+		Value* body_expr = NULL;
+		if (expr->list.count - body_start == 1) {
+			body_expr = copy_value(expr->list.items[body_start]);
+		}
+		else {
+			body_expr = make_list();
+			if (body_expr != NULL) {
+				list_push(body_expr, make_symbol("begin"));
+				for (int i = body_start; i < expr->list.count; ++i) {
+					Value* part = copy_value(expr->list.items[i]);
+					if (part == NULL) {
+						free_value(body_expr);
+						body_expr = NULL;
+						break;
+					}
+					list_push(body_expr, part);
+				}
+			}
+		}
+
+		if (body_expr == NULL) {
+			free_value(params);
+			free_env(let_env);
+			return NULL;
+		}
+
+		Value* loop_lambda = make_lambda(params, body_expr, let_env);
+		if (loop_lambda == NULL) {
+			free_value(params);
+			free_value(body_expr);
+			free_env(let_env);
+			return NULL;
+		}
+
+		env_set(let_env, name_sym->symbol, loop_lambda);
+	}
 
 	for (int i = 0; i < bindings->list.count; ++i) {
 		Value* binding = bindings->list.items[i];
@@ -611,9 +972,36 @@ static Value* apply_let(Value* expr, Env* env) {
 	}
 
 	Value* res = NULL;
-	for (int i = 2; i < expr->list.count; ++i) {
-		if (res != NULL) free_value(res);
-		res = eval(expr->list.items[i], let_env);
+	if (name_sym == NULL) {
+		for (int i = body_start; i < expr->list.count; ++i) {
+			if (res != NULL) free_value(res);
+			res = eval(expr->list.items[i], let_env);
+			if (res == NULL) {
+				free_env(let_env);
+				return NULL;
+			}
+		}
+	}
+	else {
+		Value* call_expr = make_list();
+		if (call_expr == NULL) {
+			free_env(let_env);
+			return NULL;
+		}
+
+		list_push(call_expr, make_symbol(name_sym->symbol));
+		for (int i = 0; i < bindings->list.count; ++i) {
+			Value* arg_copy = copy_value(bindings->list.items[i]->list.items[1]);
+			if (arg_copy == NULL) {
+				free_value(call_expr);
+				free_env(let_env);
+				return NULL;
+			}
+			list_push(call_expr, arg_copy);
+		}
+
+		res = eval(call_expr, let_env);
+		free_value(call_expr);
 		if (res == NULL) {
 			free_env(let_env);
 			return NULL;
@@ -937,7 +1325,31 @@ static Value* apply_set_val(Value* expr, Env* env) {
 		return NULL;
 	}
 
+	memo_clear_all();
+
 	return value;
+}
+
+static Value* apply_set_memo_limit(Value* expr, Env* env) {
+	if (expr->list.count != 2) {
+		printf("Error: set-memo-limit expects exactly 1 argument\n");
+		return NULL;
+	}
+
+	int ok = 1;
+	long long limit = eval_number(expr->list.items[1], &ok, env);
+	if (!ok) return NULL;
+	if (limit < 0) {
+		printf("Error: set-memo-limit expects non-negative number\n");
+		return NULL;
+	}
+
+	g_memo_cache_limit = (int)limit;
+	if (g_memo_cache_limit == 0 || (g_memo_inited && g_memo_cache_size > g_memo_cache_limit)) {
+		memo_clear_all();
+	}
+
+	return make_number(g_memo_cache_limit);
 }
 
 static Value* apply_pair_check(Value* expr, Env* env) {
@@ -1038,15 +1450,22 @@ static Value* apply_map(Value* expr, Env* env) {
 		return NULL;
 	}
 
-	Value* fun = eval(expr->list.items[1], env);
-	if (fun == NULL) {
-		printf("Error: failed to evaluate function argument of map\n");
-		return NULL;
+	Value* fun = NULL;
+	Value* fun_expr = expr->list.items[1];
+	if (fun_expr->type == VAL_SYMBOL && find_builtin(fun_expr->symbol) != NULL) {
+		fun = copy_value(fun_expr);
 	}
-	if (fun->type != VAL_LAMBDA) {
-		printf("Error: first argument of map must be a function\n");
-		free_value(fun);
-		return NULL;
+	else {
+		fun = eval(fun_expr, env);
+		if (fun == NULL) {
+			printf("Error: failed to evaluate function argument of map\n");
+			return NULL;
+		}
+		if (fun->type != VAL_LAMBDA) {
+			printf("Error: first argument of map must be a function\n");
+			free_value(fun);
+			return NULL;
+		}
 	}
 
 	int list_count = expr->list.count - 2;
@@ -1131,15 +1550,22 @@ static Value* apply_for_each(Value* expr, Env* env) {
 		return NULL;
 	}
 
-	Value* fun = eval(expr->list.items[1], env);
-	if (fun == NULL) {
-		printf("Error: failed to evaluate function argument of for-each\n");
-		return NULL;
+	Value* fun = NULL;
+	Value* fun_expr = expr->list.items[1];
+	if (fun_expr->type == VAL_SYMBOL && find_builtin(fun_expr->symbol) != NULL) {
+		fun = copy_value(fun_expr);
 	}
-	if (fun->type != VAL_LAMBDA) {
-		printf("Error: first argument of for-each must be a function\n");
-		free_value(fun);
-		return NULL;
+	else {
+		fun = eval(fun_expr, env);
+		if (fun == NULL) {
+			printf("Error: failed to evaluate function argument of for-each\n");
+			return NULL;
+		}
+		if (fun->type != VAL_LAMBDA) {
+			printf("Error: first argument of for-each must be a function\n");
+			free_value(fun);
+			return NULL;
+		}
 	}
 
 	int list_count = expr->list.count - 2;
@@ -1465,51 +1891,82 @@ static Value* apply_case(Value* expr, Env* env) {
 }
 
 
-static BuiltinEntry g_builtins[] = {
-	{ "+", apply_plus },
-	{ "*", apply_mul },
-	{ "-", apply_sub },
-	{ "/", apply_div },
-	{ "define", apply_define },
-	{ "lambda", apply_lambda },
-	{ "=", apply_compare },
-	{ ">", apply_compare },
-	{ "<", apply_compare },
-	{ ">=", apply_compare },
-	{ "<=", apply_compare },
-	{ "if", apply_if },
-	{ "cond", apply_cond },
-	{ "case", apply_case },
-	{ "not", apply_not },
-	{ "and", apply_and },
-	{ "or", apply_or },
-	{ "quote", apply_quote },
-	{ "car", apply_car },
-	{ "cdr", apply_cdr },
-	{ "cons", apply_cons },
-	{ "null?", apply_null_check },
-	{ "number?", apply_number_check },
-	{ "symbol?", apply_symbol_check },
-	{ "list?", apply_list_check },
-	{ "boolean?", apply_boolian_check },
-	{ "begin", apply_begin },
-	{ "let", apply_let },
-	{ "let*", apply_let_star },
-	{ "letrec", apply_letrec },
-	{ "set!", apply_set_val },
-	{ "eq?", apply_eq },
-	{ "eqv?", apply_eqv },
-	{ "equal?", apply_equal },
-	{ "pair?", apply_pair_check },
-	{ "list", apply_list },
-	{ "append", apply_append },
-	{ "length", apply_length },
-	{ "map", apply_map },
-	{ "for-each", apply_for_each },
-	{ "apply", apply_apply },
-	{ "display", appluy_displey },
-	{ "newline", apply_newline },
+BuiltinEntry g_builtins[] = {
+	{ "+", apply_plus, help_plus },
+	{ "*", apply_mul, help_mul },
+	{ "-", apply_sub, help_sub },
+	{ "/", apply_div, help_div },
+	{ "define", apply_define, help_define },
+	{ "lambda", apply_lambda, help_lambda },
+	{ "=", apply_compare, help_eq_number },
+	{ ">", apply_compare, help_greater },
+	{ "<", apply_compare, help_less },
+	{ ">=", apply_compare, help_greater_eq },
+	{ "<=", apply_compare, help_less_eq },
+	{ "if", apply_if, help_if },
+	{ "cond", apply_cond, help_cond },
+	{ "case", apply_case, help_case },
+	{ "not", apply_not, halp_not },
+	{ "and", apply_and, help_and },
+	{ "or", apply_or, help_or },
+	{ "quote", apply_quote, help_quote },
+	{ "car", apply_car, help_car },
+	{ "cdr", apply_cdr, help_cdr },
+	{ "cons", apply_cons, help_cons },
+	{ "null?", apply_null_check, help_null_check },
+	{ "number?", apply_number_check, help_number_check },
+	{ "symbol?", apply_symbol_check, help_cymbol_check },
+	{ "list?", apply_list_check, help_list_check },
+	{ "boolean?", apply_boolian_check, help_boolean_check },
+	{ "begin", apply_begin, help_begin },
+	{ "let", apply_let, help_let },
+	{ "let*", apply_let_star, help_let_star },
+	{ "letrec", apply_letrec, help_letrec },
+	{ "set!", apply_set_val, help_set_val },
+	{ "set-memo-limit", apply_set_memo_limit, help_set_memo_limit },
+	{ "eq?", apply_eq, help_eq },
+	{ "eqv?", apply_eqv, help_eqv },
+	{ "equal?", apply_equal, help_equal },
+	{ "pair?", apply_pair_check, help_pair_check },
+	{ "list", apply_list, help_list },
+	{ "append", apply_append, help_append },
+	{ "length", apply_length, help_length },
+	{ "map", apply_map, help_map },
+	{ "for-each", apply_for_each, help_for_each },
+	{ "apply", apply_apply, help_apply },
+	{ "display", appluy_displey, help_display },
+	{ "newline", apply_newline, help_newline },
 };
+
+BuiltinEntry* get_function() {
+	int n = (int)(sizeof(g_builtins) / sizeof(g_builtins[0]));
+	BuiltinEntry* names = (BuiltinEntry*)malloc(sizeof(BuiltinEntry) * (n + 1));
+	if (names == NULL) {
+		printf("Error: out of memory\n");
+		return NULL;
+	}
+	for (int i = 0; i < n; i++) {
+		names[i] = g_builtins[i];
+	}
+	names[n].name = NULL;
+	return names;
+}
+
+void helper_function(const char* name) {
+	int n = (int)(sizeof(g_builtins) / sizeof(g_builtins[0]));
+	for (int i = 0; i < n; i++) {
+		if (strcmp(g_builtins[i].name, name) == 0) {
+			if (g_builtins[i].help_fn != NULL) {
+				g_builtins[i].help_fn();
+			}
+			else {
+				printf("No help available for %s\n", name);
+			}
+			return;
+		}
+	}
+	printf("No such function: %s\n", name);
+}
 
 static BuiltinFn find_builtin(const char* op) {
 	int n = (int)(sizeof(g_builtins) / sizeof(g_builtins[0]));
@@ -1554,24 +2011,76 @@ static Value* apply_lambda_call(Value* fn, Value* call_expr, Env* env) {
 		return NULL;
 	}
 
-	Env* call_env = create_env(fn->lambda.closure);
-
 	for (int i = 0; i < param_count; i++) {
 		Value* param = fn->lambda.params->list.items[i];
 		if (param->type != VAL_SYMBOL) {
 			printf("Error: lambda parameter must be a symbol\n");
-			free_env(call_env);
 			return NULL;
 		}
-		Value* arg = eval(call_expr->list.items[i + 1], env);
-		if (arg == NULL) {
-			free_env(call_env);
-			return NULL;
-		}
-		env_set(call_env, param->symbol, arg);
 	}
 
+	Value** args = (Value**)malloc(sizeof(Value*) * param_count);
+	if (args == NULL) {
+		printf("Error: out of memory\n");
+		return NULL;
+	}
+
+	for (int i = 0; i < param_count; ++i) {
+		args[i] = eval(call_expr->list.items[i + 1], env);
+		if (args[i] == NULL) {
+			for (int k = 0; k < i; ++k) free_value(args[k]);
+			free(args);
+			return NULL;
+		}
+	}
+
+	bool use_memo = can_memoize_lambda_call(fn, call_expr);
+	char* memo_key = NULL;
+
+	if (use_memo) {
+		memo_key = make_memo_key(call_expr->list.items[0]->symbol, args, param_count);
+		if (memo_key == NULL) {
+			use_memo = false;
+		}
+		else {
+			memo_init();
+			Value* cached = NULL;
+			if (get(&g_memo_cache, memo_key, &cached)) {
+				Value* hit = copy_value(cached);
+				for (int i = 0; i < param_count; ++i) free_value(args[i]);
+				free(args);
+				free(memo_key);
+				return hit;
+			}
+		}
+	}
+
+	Env* call_env = create_env(fn->lambda.closure);
+	for (int i = 0; i < param_count; i++) {
+		Value* param = fn->lambda.params->list.items[i];
+		env_set(call_env, param->symbol, args[i]);
+	}
+	free(args);
+
 	Value* result = eval(fn->lambda.body, call_env);
+
+	if (result != NULL && use_memo && memo_key != NULL && result->type != VAL_VOID) {
+		Value* stored = copy_value(result);
+		if (stored != NULL && g_memo_cache_limit > 0) {
+			memo_init();
+			if (g_memo_cache_size >= g_memo_cache_limit) {
+				memo_clear_all();
+			}
+			insert(&g_memo_cache, memo_key, stored);
+			g_memo_cache_size++;
+		}
+		else {
+			free_value(stored);
+		}
+	}
+
+	free(memo_key);
+
 	if (result == NULL || result->type != VAL_LAMBDA) {
 		free_env(call_env);
 	}

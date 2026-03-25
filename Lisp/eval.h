@@ -8,8 +8,13 @@
 
 #include "expr.h"
 #include "env.h"
+#include "helper.h"
 
 long long eval_number(Value* expr, int* ok, Env* env);
 Value* eval(Value* expr, Env* env);
 
-#endif#endif
+BuiltinEntry* get_function(void);
+
+void helper_function(const char* s);
+
+#endif

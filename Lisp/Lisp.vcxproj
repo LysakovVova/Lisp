@@ -130,18 +130,25 @@
   <ItemGroup>
     <ClCompile Include="env.c" />
     <ClCompile Include="eval.c" />
+    <ClCompile Include="helper.c" />
     <ClCompile Include="lexer.c" />
     <ClCompile Include="expr.c" />
     <ClCompile Include="map.c" />
+    <ClCompile Include="repl.c" />
     <ClCompile Include="Source.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="base_types.h" />
     <ClInclude Include="env.h" />
     <ClInclude Include="eval.h" />
+    <ClInclude Include="helper.h" />
     <ClInclude Include="lexer.h" />
     <ClInclude Include="expr.h" />
     <ClInclude Include="map.h" />
+    <ClInclude Include="repl.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="test.lisp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
